@@ -1091,16 +1091,23 @@ extractResiduals <- function(outfiletext, filename) {
   residSubsections <- getMultilineSection("ESTIMATED MODEL AND RESIDUALS \\(OBSERVED - ESTIMATED\\)( FOR [\\w\\d\\s\\.,_]+)*",
     residSection, filename, allowMultiple=TRUE)
   
-  matchlines <- attr(residSubsections, "matchlines")
+  # Also find bivariate data from LCA
+  bivarSubsections <- getMultilineSection("{+2b}BIVARIATE DISTRIBUTIONS FIT FOR CLASS \\d+", residSection, filename, allowMultiple=TRUE)
   
-  if (length(residSubsections) == 0) {
+  if (is.na(residSubsections[1]) & is.na(bivarSubsections[1])) {
     warning("No sections found within residuals output.")
     return(list())
   }
-  else if (length(residSubsections) > 1)
-    groupNames <- make.names(gsub("^\\s*ESTIMATED MODEL AND RESIDUALS \\(OBSERVED - ESTIMATED\\)( FOR ([\\w\\d\\s\\.,_]+))*\\s*$", "\\2", residSection[matchlines], perl=TRUE))
   
   residList <- list()
+  class(residList) <- c("list", "mplus.residuals")
+  
+  if (! is.na(residSubsections[1])) {
+    matchlines <- attr(residSubsections, "matchlines")
+    
+    if (length(residSubsections) > 1)
+      groupNames <- make.names(gsub("^\\s*ESTIMATED MODEL AND RESIDUALS \\(OBSERVED - ESTIMATED\\)( FOR ([\\w\\d\\s\\.,_]+))*\\s*$", "\\2", residSection[matchlines], perl=TRUE))
+    
   #multiple groups possible
   for (g in 1:length(residSubsections)) {
     targetList <- list()
@@ -1124,8 +1131,32 @@ extractResiduals <- function(outfiletext, filename) {
       residList <- targetList
   }
   
-  class(residList) <- c("list", "mplus.residuals")
   if (length(residSubsections) > 1) attr(residList, "group.names") <- groupNames
+  }
+  
+  if (! is.na(bivarSubsections[1])) {
+    matchlines <- attr(bivarSubsections, "matchlines")
+    
+    if (length(bivarSubsections) > 1)
+      groupNames <- make.names(gsub("^\\s*BIVARIATE DISTRIBUTIONS FIT FOR CLASS (\\d+)\\s*$", "\\1", residSection[matchlines], perl=TRUE))    
+    
+    bivarData <- list()
+    
+    for (g in 1:length(bivarSubsections)) {
+      bivarRet <- extractBivarFitData(bivarSubsections[[g]][2:length(bivarSubsections[[g]])], numCols = 8)
+      bivarClassData <- bivarRet$bivar_model_fit_info
+      
+      names(bivarClassData) <- c("var1", "var2", "cat1", "cat2", "observed", "estimated", "residual", "std.residual")
+      
+      if (length(bivarSubsections) > 1) {
+        bivarData[[groupNames[g]]] <- bivarClassData
+      }
+      else
+        bivarData <- bivarClassData
+    }
+    
+    residList$bivarData <- bivarData
+  }
   
   return(residList)
 }
@@ -1702,34 +1733,49 @@ extractTech10 <- function(outfiletext, filename) {
   tech10Section <- getSection("^TECHNICAL 10 OUTPUT$", outfiletext)
   if (is.null(tech10Section)) return(list()) #no tech10 output
   
-  tech10List <- list()
-  
   bivarFit <- getSection("^\\s*BIVARIATE MODEL FIT INFORMATION\\s*$", outfiletext)
   
-  if (is.null(bivarFit)) return(tech10List) 
+  if (is.null(bivarFit)) return(list()) 
   
+  bivarFit <- bivarFit[6:length(bivarFit)]
+  
+  bivarData <- extractBivarFitData(bivarFit)
+  names(bivarData$bivar_model_fit_info) <- c("var1", "var2", "cat1", "cat2", "h0", "h1", "z")
+  
+  return (bivarData)
+  
+}
+
+#' Extract Bivariate Fit Data from either TECH10 or RESIDUAL output sections
+#'
+#' Called internally after extracting bivar fit data from either of these sections
+#'
+#' @param rawBivarFitData the bivar data extracted from the output section
+#' @param numCols the number of columns to expect from the output
+#' @return A list containing the bivarfit data and the bivar chi square data, if requested
+#' @keywords internal
+#' @examples
+#' # make me!!!
+extractBivarFitData <- function(rawBivarFitData, numCols = 7) {
   # Build data structures
-  bivarFitData <- matrix(nrow=length(bivarFit), ncol=7)
+  bivarFitData <- matrix(nrow=length(rawBivarFitData), ncol=numCols)
   bivarFitStats <- matrix(nrow=0, ncol=4)
   
-  # Skip header lines
-  bivarFit <- bivarFit[6:length(bivarFit)]
-
   vars <- NULL
   lastPearson <- NULL
   mPos <- 1
     
-  for (l in 1:length(bivarFit)) {
-    if (grepl("^\\s*$", bivarFit[l], perl = TRUE)) { next }
+  for (l in 1:length(rawBivarFitData)) {
+    if (grepl("^\\s*$", rawBivarFitData[l], perl = TRUE)) { next }
     
-    if (grepl("^\\s{5}\\S", bivarFit[l], perl = TRUE)) {
+    if (grepl("^\\s{5}\\S", rawBivarFitData[l], perl = TRUE)) {
       # Parse new vars line
-      vars <- unlist(strsplit(trimSpace(bivarFit[l]), "\\s+", perl = TRUE))
+      vars <- unlist(strsplit(trimSpace(rawBivarFitData[l]), "\\s+", perl = TRUE))
     }
-    else if (grepl("Bivariate (Pearson|Log-Likelihood) Chi-Square", bivarFit[l], perl = TRUE)) {
-      if (grepl("Overall", bivarFit[l], perl = TRUE)) { next } # Skip 'overall' values
+    else if (grepl("Bivariate (Pearson|Log-Likelihood) Chi-Square", rawBivarFitData[l], perl = TRUE)) {
+      if (grepl("Overall", rawBivarFitData[l], perl = TRUE)) { next } # Skip 'overall' values
       
-      m <- unlist(regmatches(bivarFit[l], regexec("Bivariate (Pearson|Log-Likelihood) Chi-Square\\s+(\\S+)", bivarFit[l], perl = TRUE)))
+      m <- unlist(regmatches(rawBivarFitData[l], regexec("Bivariate (Pearson|Log-Likelihood) Chi-Square\\s+(\\S+)", rawBivarFitData[l], perl = TRUE)))
       
       if (m[2] == 'Pearson') {
         lastPearson <- m[3]
@@ -1739,7 +1785,7 @@ extractTech10 <- function(outfiletext, filename) {
       }
     }
     else {
-      values <- unlist(strsplit(trimSpace(bivarFit[l]), "\\s{2,}", perl = TRUE))
+      values <- unlist(strsplit(trimSpace(rawBivarFitData[l]), "\\s{2,}", perl = TRUE))
       
       bivarFitData[mPos,] <-c(vars,values)
       mPos <- mPos + 1
@@ -1749,20 +1795,21 @@ extractTech10 <- function(outfiletext, filename) {
   # Remove empty rows, and convert to data.frame
   bivarFitData <- bivarFitData[rowSums(is.na(bivarFitData)) != ncol(bivarFitData),]
   bivarFitData <- as.data.frame( bivarFitData, stringsAsFactors = FALSE )
-  names(bivarFitData) <- c("var1", "var2", "cat1", "cat2", "h0", "h1", "z")
   
   # Fix data types
-  bivarFitData[,c("h0", "h1", "z")] <- as.numeric(unlist(bivarFitData[,c("h0", "h1", "z")]))
+  bivarFitData[,c(5:numCols)] <- as.numeric(unlist(bivarFitData[,c(5:numCols)]))
   
+  if (nrow(bivarFitStats) > 0) {
   bivarFitStats <- setNames(data.frame(bivarFitStats, stringsAsFactors = FALSE), c("var1","var2","pearson","log-likelihood"))
   bivarFitStats[,c("pearson","log-likelihood")] <- as.numeric(unlist(bivarFitStats[,c("pearson","log-likelihood")]))
+  }
   
-  tech10List$bivar_model_fit_info <- bivarFitData
-  tech10List$bivar_chi_square <- bivarFitStats
+  ret <- list(
+    bivar_model_fit_info = bivarFitData,
+    bivar_chi_square = bivarFitStats
+  )    
   
-  
-  return(tech10List)
-  
+  return (ret)
 }
 
 #' Extract Technical 12 from Mplus
